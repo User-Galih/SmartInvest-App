@@ -68,9 +68,16 @@ export default function AnalysisModal({
     setFormData((prev) => ({ ...prev, [field]: value }));
   };
 
+  // Batas maksimum dataset historis yang tersedia di bursa (2026-03-31)
+  const MAX_DATASET_DATE = "2026-03-31";
+  const effectiveMaxDate =
+    new Date().toISOString().split("T")[0] > MAX_DATASET_DATE
+      ? MAX_DATASET_DATE
+      : new Date().toISOString().split("T")[0];
+
   const handleQuickSelect = (months) => {
-    const endDate = new Date();
-    const startDate = new Date();
+    const endDate = new Date(effectiveMaxDate);
+    const startDate = new Date(effectiveMaxDate);
     startDate.setMonth(startDate.getMonth() - months);
 
     const formatDate = (date) => date.toISOString().split("T")[0];
@@ -344,7 +351,7 @@ export default function AnalysisModal({
                     value={formData.start_date}
                     onChange={handleChange("start_date")}
                     min="2018-01-01"
-                    max={new Date().toISOString().split("T")[0]}
+                    max={effectiveMaxDate}
                     disabled={isLoading}
                     className="bg-transparent text-xs font-bold text-smart-navy outline-none border-b border-gray-200 pb-1"
                   />
@@ -358,7 +365,7 @@ export default function AnalysisModal({
                     value={formData.end_date}
                     onChange={handleChange("end_date")}
                     min="2018-01-01"
-                    max={new Date().toISOString().split("T")[0]}
+                    max={effectiveMaxDate}
                     disabled={isLoading}
                     className="bg-transparent text-xs font-bold text-smart-navy outline-none border-b border-gray-200 pb-1"
                   />

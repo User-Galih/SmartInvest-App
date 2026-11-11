@@ -1,0 +1,22 @@
+name: Keep Alive Supabase & Hugging Face Space
+
+on:
+  schedule:
+    # Jalan otomatis setiap 2 hari sekali jam 01:00 UTC (08:00 WIB)
+    - cron: '0 1 */2 * *'
+  workflow_dispatch:
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Supabase Database
+        run: |
+          curl -s -o /dev/null -w "Supabase HTTP Status: %{http_code}\n" \
+            "https://alsduqrfszpqktliknfe.supabase.co/rest/v1/bi_rates?select=tanggal&limit=1" \
+            -H "apikey: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsc2R1cXJmc3pwcWt0bGlrbmZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MjA0ODAsImV4cCI6MjEwOTk5NjQ4MH0.jq_DxhB_Y24yZcesaLy7cu2FDkcJbB5qxjYOw1PmMcU"
+
+      - name: Ping Hugging Face Space Backend
+        run: |
+          curl -s -o /dev/null -w "HF Space HTTP Status: %{http_code}\n" \
+            "https://galihpp123-smartinvestapi.hf.space/"

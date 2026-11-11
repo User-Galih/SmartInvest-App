@@ -24,18 +24,18 @@ from utils.portfolio_models import compare_all_models, run_selected_model
 from services.stock_analysis_service import predict_stock_trend
 from utils.portfolio_scoring import composite_portfolio_scoring
 
-# Ambil kredensial lingkungan dari file .env backend
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# Ambil kredensial lingkungan dari file .env backend (dengan fallback default)
+DEFAULT_SUPABASE_URL = "https://alsduqrfszpqktliknfe.supabase.co"
+DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsc2R1cXJmc3pwcWt0bGlrbmZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MjA0ODAsImV4cCI6MjEwOTk5NjQ4MH0.jq_DxhB_Y24yZcesaLy7cu2FDkcJbB5qxjYOw1PmMcU"
 
-# Validasi fail-safe jika env lupa terisi saat server dinyalakan
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print("⚠️ Peringatan: SUPABASE_URL atau SUPABASE_KEY tidak ditemukan di .env backend!")
-    supabase: Client = None
-else:
-    # Inisialisasi client Supabase resmi untuk Python
+SUPABASE_URL = os.getenv("SUPABASE_URL") or DEFAULT_SUPABASE_URL
+SUPABASE_KEY = os.getenv("SUPABASE_KEY") or DEFAULT_SUPABASE_KEY
+
+try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
+except Exception as e:
+    print(f"Peringatan: Gagal inisialisasi Supabase di ihsg_service: {e}")
+    supabase: Client = None
 # ==============================================================================
 # TICKER METADATA MAPPING (LQ45 & IDX30 Stocks)
 # ==============================================================================
