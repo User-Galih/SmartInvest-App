@@ -73,16 +73,18 @@ def load_bi_rate_csv_fallback():
 def load_bi_rate():
     """
     Load data BI Rate langsung dari database Supabase sebagai risk-free rate,
-    dengan fallback otomatis ke bi_rate_daily.csv.
+    digabungkan dengan CSV lokal agar tidak terpotong limit 1000 baris PostgREST.
     """
+    csv_df = load_bi_rate_csv_fallback()
     try:
         if supabase is None:
-            return load_bi_rate_csv_fallback()
+            return csv_df
 
         response = (
             supabase.table("bi_rates")
             .select("tanggal, rate")
-            .order("tanggal", desc=False)
+            .order("tanggal", desc=True)
+            .limit(1000)
             .execute()
         )
 
@@ -90,17 +92,22 @@ def load_bi_rate():
 
         if bi_rate.empty:
             print("Peringatan: Tabel bi_rates di Supabase kosong, menggunakan CSV fallback.")
-            return load_bi_rate_csv_fallback()
+            return csv_df
 
         bi_rate = bi_rate.rename(columns={"tanggal": "Date", "rate": "BI-Rate"})
         bi_rate["Date"] = pd.to_datetime(bi_rate["Date"])
         bi_rate.set_index("Date", inplace=True)
 
-        return bi_rate
+        if not csv_df.empty:
+            combined = pd.concat([csv_df, bi_rate])
+            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            return combined
+
+        return bi_rate.sort_index()
 
     except Exception as e:
         print(f"Error saat mengambil BI Rate dari Supabase ({e}), menggunakan CSV fallback.")
-        return load_bi_rate_csv_fallback()
+        return csv_df
 
 
 def load_clean_master_stock_data():

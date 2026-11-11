@@ -21,7 +21,9 @@ def predict_ihsg_route(request: IHSGRequest):
             index_choice=request.index_choice,
             start_date=request.start_date,
             end_date=request.end_date,
-            investment_amount=request.investment_amount
+            investment_amount=request.investment_amount,
+            user_id=request.user_id,
+            gemini_api_key=request.gemini_api_key
         )
 
     except Exception as e:
@@ -29,4 +31,4 @@ def predict_ihsg_route(request: IHSGRequest):
         raise HTTPException(
             status_code=500,
             detail=str(e)
-        )
+        )

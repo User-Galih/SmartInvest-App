@@ -1,72 +1,127 @@
 import os
-import google.generativeai as genai
-import json
+import re
 
-# API Keys loaded dynamically per endpoint to avoid rate limits
+# Model prioritas sesuai generasi terbaru Google AI Studio
+PREFERRED_MODELS = [
+    os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
+    "gemini-4-argon",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+]
+
+
+def _call_gemini(prompt: str, custom_api_key: str = None, key_env_var: str = "GEMINI_API_KEY") -> str | None:
+    """
+    Memanggil Gemini API menggunakan SDK google-genai terbaru (dengan fallback ke google.generativeai)
+    dan mencoba daftar model prioritas secara berurutan.
+    Mengembalikan None jika tidak ada API Key atau seluruh model gagal.
+    """
+    key = (
+        custom_api_key
+        or os.getenv(key_env_var)
+        or os.getenv("GEMINI_API_KEY_ANALYSIS")
+        or os.getenv("GEMINI_API_KEY_IHSG")
+        or os.getenv("GEMINI_API_KEY")
+    )
+    if not key or not key.strip():
+        return None
+
+    key = key.strip()
+
+    # 1. Gunakan SDK resmi terbaru: google-genai
+    try:
+        from google import genai as new_genai
+
+        client = new_genai.Client(api_key=key)
+        seen = set()
+        for model_name in PREFERRED_MODELS:
+            if not model_name or model_name in seen:
+                continue
+            seen.add(model_name)
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                )
+                if response and getattr(response, "text", None):
+                    return response.text.strip()
+            except Exception as err:
+                print(f"[genai_service] google-genai gagal pada model {model_name}: {err}")
+                continue
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"[genai_service] Inisialisasi google-genai gagal: {e}")
+
+    # 2. Fallback ke SDK legacy jika google-genai belum terinstal di environment
+    try:
+        import google.generativeai as legacy_genai
+
+        legacy_genai.configure(api_key=key)
+        seen = set()
+        for model_name in PREFERRED_MODELS:
+            if not model_name or model_name in seen:
+                continue
+            seen.add(model_name)
+            try:
+                model = legacy_genai.GenerativeModel(model_name)
+                response = model.generate_content(prompt)
+                if response and getattr(response, "text", None):
+                    return response.text.strip()
+            except Exception as err:
+                print(f"[genai_service] google.generativeai gagal pada model {model_name}: {err}")
+                continue
+    except Exception as e:
+        print(f"[genai_service] Fallback legacy SDK gagal: {e}")
+
+    return None
+
+
+def _parse_top_tickers_from_alloc(alloc_str: str):
+    """Mengekstrak daftar (ticker, weight_pct) dari string alokasi untuk narasi dinamis."""
+    if not alloc_str:
+        return []
+    matches = re.findall(r"([A-Z]{4})\s*\((-?\d+(?:\.\d+)?)%\)", alloc_str)
+    parsed = [(t, float(w)) for t, w in matches]
+    parsed.sort(key=lambda x: abs(x[1]), reverse=True)
+    return parsed
+
 
 # ==============================================================================
-# 1. MARKET SUMMARY (DIREKTUR OLEH ENDPOINT PREDICT-IHSG)
+# 1. MARKET SUMMARY (DIPANGGIL OLEH ENDPOINT PREDICT-IHSG)
 # ==============================================================================
 def generate_market_summary(
     market_trend,
     confidence,
     market_condition,
     recommended_method,
-    reason
+    reason,
+    gemini_api_key: str = None,
 ):
-    key = os.getenv("GEMINI_API_KEY_IHSG") or os.getenv("GEMINI_API_KEY")
-    if not key or key.strip() == "":
-        return "GenAI Error: API Key untuk IHSG tidak ditemukan di .env."
+    prompt = f"""Kamu adalah analis kuantitatif dan penasihat investasi pasar modal Indonesia di SmartInvest AI.
+Berdasarkan hasil model prediksi BiLSTM + Attention terhadap pergerakan Indeks Harga Saham Gabungan (IHSG):
+- Arah Tren IHSG: {market_trend} ({market_condition})
+- Tingkat Keyakinan Model: {confidence:.2%}
+- Metode Optimasi Portofolio yang Direkomendasikan: {recommended_method}
+- Rasionalisasi Kuantitatif: {reason}
 
-    try:
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-
-        prompt = f"""
-Kamu adalah SmartInvest AI,
-asisten investasi saham.
-
-Berikut hasil prediksi pasar IHSG.
-
-Trend Pasar:
-{market_trend}
-
-Confidence:
-{confidence:.2%}
-
-Kondisi Pasar:
-{market_condition}
-
-Metode yang Direkomendasikan:
-{recommended_method}
-
-Alasan:
-{reason}
-
-TUGAS:
-
-1. Mulai dengan:
-📈 SmartInvest AI Market Insight
-
-2. Jelaskan kondisi pasar dengan bahasa sederhana.
-
-3. Jelaskan arti confidence prediction.
-
-4. Jelaskan kenapa metode tersebut cocok.
-
-5. Berikan 2-3 tips investasi singkat.
-
-6. Gunakan bahasa santai dan mudah dipahami orang awam.
-
-7. Maksimal 180 kata.
-
-8. Tambahkan emoticon agar menarik.
+Tugasmu:
+1. Awali dengan judul: 📈 SmartInvest AI Market Insight
+2. Berikan analisis ringkas, tajam, dan spesifik mengenai kondisi pasar {market_trend} saat ini serta apa arti tingkat keyakinan {confidence:.2%} bagi pengambilan keputusan investor.
+3. Jelaskan secara logis mengapa metode {recommended_method} menjadi pendekatan paling tepat untuk merespons kondisi tersebut.
+4. Berikan 2-3 langkah taktis yang relevan dengan kondisi {market_trend}.
+5. Gunakan Bahasa Indonesia yang profesional, mengalir alami, edukatif, dan mudah dipahami (maksimal 180 kata). Hindari kata-kata slang/alay seperti "gokil", "gercep", atau "anti-boncos".
 """
-        response = model.generate_content(prompt)
-        return response.text
+    ai_text = _call_gemini(prompt, custom_api_key=gemini_api_key, key_env_var="GEMINI_API_KEY_IHSG")
+    if ai_text:
+        return ai_text
 
-    except Exception as e:
-        return f"GenAI Error: {str(e)}"
+    return (
+        f"📈 SmartInvest AI Market Insight\n\n"
+        f"Model BiLSTM + Attention mendeteksi pergerakan IHSG berada pada fase **{market_trend}** ({market_condition}) "
+        f"dengan tingkat keyakinan statistik sebesar **{confidence:.2%}**. Dalam kondisi ini, metode **{recommended_method}** "
+        f"direkomendasikan karena {reason.lower()} Disarankan untuk menjaga disiplin alokasi bobot aset dan menyesuaikan eksposur risiko secara berkala."
+    )
 
 
 # ==============================================================================
@@ -87,35 +142,55 @@ def generate_recommendation_summary(
     alloc_str,
     comparison_str,
     investment_amount=10000000,
-    index_choice="LQ45"
+    index_choice="LQ45",
+    gemini_api_key: str = None,
 ):
     has_short = "-" in alloc_str
-
-    # Deskripsi index
     index_upper = index_choice.upper() if index_choice else "LQ45"
     if index_upper == "LQ45":
-        index_desc = "LQ45 (45 saham paling likuid dan berkapitalisasi besar di Bursa Efek Indonesia)"
+        index_desc = "LQ45 (45 saham dengan likuiditas tertinggi dan kapitalisasi pasar besar di BEI)"
     elif index_upper in ["IDX30", "IDX 30"]:
-        index_desc = "IDX30 (30 saham blue-chip terpilih dengan likuiditas dan fundamental terbaik di BEI)"
+        index_desc = "IDX30 (30 saham unggulan berfundamental inti di Bursa Efek Indonesia)"
     else:
-        index_desc = f"{index_upper}"
+        index_desc = index_upper
 
-    if has_short:
-        p4_text = f"Hasilnya mantap banget! Kamu bisa melihat sendiri portofolio terbaikmu memiliki proyeksi keuntungan tahunan (Expected Return) sebesar **{ret_pct:.1f}%** dengan tingkat fluktuasi risiko tahunan yang sangat terukur sebesar **{risk_pct:.1f}%**. Karena portofoliomu kali ini memanfaatkan strategi **short selling** (bobot negatif) pada saham tertentu, AI kita langsung gercep memadukan posisi taktis ini untuk menghasilkan peluang keuntungan melimpah ketika harga emiten pilihanmu terkoreksi di pasar. Rasio efisiensi Sharpe Ratio yang didapatkan mencapai **{sharpe:.3f}**, yang artinya setiap unit risiko yang kamu tanggung memberikan bonus imbal hasil yang sangat optimal dan memuaskan! 💸🔥"
-        beta_desc = f"Tingkat sensitivitas pergerakan nilai portofolio Anda terhadap indeks pasar IHSG secara keseluruhan (Beta = {f'{beta:.2f}' if beta is not None else 'N/A'}). Mengingat adanya posisi short selling di portofoliomu, nilai Beta ini membantumu melacak ketahanan portofolio terhadap guncangan pasar searah."
-    else:
-        p4_text = f"Hasilnya mantap banget! Kamu bisa melihat sendiri portofolio terbaikmu memiliki proyeksi keuntungan tahunan (Expected Return) sebesar **{ret_pct:.1f}%** dengan tingkat fluktuasi risiko tahunan yang sangat terukur sebesar **{risk_pct:.1f}%**. Rasio efisiensi Sharpe Ratio yang didapatkan mencapai **{sharpe:.3f}**, yang artinya setiap unit risiko yang kamu tanggung memberikan bonus imbal hasil yang sangat optimal dan memuaskan! 💸🔥"
-        beta_desc = f"Tingkat sensitivitas pergerakan nilai portofolio Anda terhadap indeks pasar IHSG secara keseluruhan (Beta = {f'{beta:.2f}' if beta is not None else 'N/A'}). Nilai ini membantu mendeteksi apakah portofolio Anda lebih stabil (Beta < 1) or lebih agresif (Beta > 1) dibanding pasar."
+    beta_str = f"{beta:.2f}" if beta is not None else "N/A"
+    spread_vs_bi = ret_pct - float(bi_rate)
 
-    fallback_text = f"""👋 Hallo Sobat SmartInvest! 🚀
+    prompt = f"""Kamu adalah Senior Quantitative Portfolio Advisor di SmartInvest.
+Tugasmu adalah menulis analisis rekomendasi portofolio saham yang **benar-benar spesifik, analitis, dan mendalam** berdasarkan angka dan komposisi saham riil di bawah ini.
 
-Wah, senang banget deh bisa nemenin perjalanan investasimu biar bisa capai kebebasan finansial yang terukur! 🎯 Jadi gini, berdasarkan modal awal yang kamu input sebesar **Rp {investment_amount:,.0f}** dengan BI Rate acuan terupdate **{bi_rate}%**, sistem AI kita langsung gercep memindai data bursa historis secara mendalam selama **{horizon_yr}** tahun terakhir untuk menguji ketahanan portofoliomu! 📈 Indeks acuan yang kamu pilih adalah **{index_desc}**, yang menjadi universe saham kandidat terpilih untuk portofoliomu. Mengingat kondisi tren makro IHSG saat ini terdeteksi lagi **{market_trend_str}**, metode **{best_method}** terpilih secara otomatis sebagai algoritma paling optimal buat nyusun porsi dana investasimu secara cerdas! 🏆
+ATURAN GAYA BAHASA (SANGAT PENTING):
+- JANGAN gunakan kata-kata slang/template klise seperti "gokil", "gercep", "anti-boncos", "cuan melimpah", "Wah, senang banget deh", atau "Hasilnya mantap banget!".
+- Tulis analisis layaknya penasihat keuangan profesional yang ramah, cerdas, variatif, dan langsung membahas saham-saham spesifik serta angka metrik yang muncul di data.
+- Setiap paragraf harus mengupas data aktual di bawah ini (sebutkan langsung nama-nama ticker saham dengan bobot terbesar di {alloc_str}, bandingkan langsung angka return/risiko/Sharpe antar metode di {comparison_str}, dan hitung selisih return terhadap BI Rate {bi_rate}%).
 
-Kenapa sih inputanmu tadi penting banget? Nah, modal awal sebesar **Rp {investment_amount:,.0f}** adalah basis yang mantap untuk memulai pembentukan kekayaan jangka panjang. Suku bunga acuan BI Rate sebesar **{bi_rate}%** berfungsi sebagai pembanding bebas risiko (risk-free rate) agar kita tahu apakah portofolio sahammu benar-benar menghasilkan keuntungan yang jauh mengalahkan tabungan biasa. Ditambah lagi, data historis bursa selama **{horizon_yr}** tahun ke belakang memberikan jaminan bahwa portofolio ini sudah diuji melewati berbagai pasang surut iklim bursa Indonesia secara nyata! 🏦✨
+DATA KUANTITATIF AKTUAL:
+- Modal Investasi: Rp {investment_amount:,.0f}
+- Indeks Universe: {index_desc}
+- Horizon Data Historis: {horizon_yr} tahun
+- Suku Bunga Acuan (BI Rate): {bi_rate}%
+- Proyeksi Tren Makro IHSG: {market_trend_str} (Confidence: {confidence:.1%})
+- Metode Optimasi Terpilih: {best_method}
+- Expected Return Portofolio: {ret_pct:.2f}% per tahun (selisih {spread_vs_bi:+.2f}% di atas BI Rate)
+- Risiko Tahunan (Volatilitas): {risk_pct:.2f}% per tahun
+- Sharpe Ratio: {sharpe:.3f}
+- Beta Portofolio: {beta_str}
+- Simulasi Nominal (1 Tahun): Potensi pertumbuhan +Rp{gain_ex:,} | Potensi fluktuasi risiko -Rp{loss_ex:,}
+- Komposisi Bobot Saham Terpilih:
+{alloc_str}
+- Perbandingan Ketiga Metode (MVEP vs SIM vs CAPM):
+{comparison_str}
 
-Metode **{best_method}** dipilih oleh sistem cerdas kita karena terbukti paling jago mengoptimalkan bobot saham dalam kondisi pasar yang sedang **{market_trend_str}**. Algoritma ini bekerja dengan sangat teliti untuk menyusun porsi dana investasimu agar dapat memaksimalkan imbal hasil sekaligus meredam guncangan pasar. Sistem secara aktif memilah saham-saham berfundamental solid dan menyingkirkan emiten yang berisiko tinggi, sehingga kamu memiliki portofolio tangguh yang siap menghadapi segala arah pergerakan pasar saham! 🛡️💼
+STRUKTUR OUTPUT WAJIB (Ikuti header bagian di bawah ini secara persis agar komponen visual aplikasi dapat mem-parsing tiap bagian dengan benar):
 
-{p4_text}
+👋 Hallo Sobat SmartInvest!
+
+[Tulis 4 paragraf analisis mendalam yang Masing-Masing terdiri dari 4-6 kalimat analitis dan mengalir alami:
+- Paragraf 1: Evaluasi konteks makro & pemilihan metode. Bahas mengapa pada tren IHSG yang cenderung {market_trend_str} dengan BI Rate {bi_rate}%, algoritma {best_method} unggul dibandingkan dua metode lainnya pada universe {index_upper} selama rentang historis {horizon_yr} tahun untuk modal Rp {investment_amount:,.0f}.
+- Paragraf 2: Bedah komposisi saham aktual. Sebutkan secara spesifik emiten-emiten dengan alokasi bobot terbesar dari daftar komposisi di atas, jelaskan peran saham-saham utama tersebut dalam membentuk keseimbangan return dan volatilitas portofolio.
+- Paragraf 3: Bedah perbandingan kuantitatif antar metode ({comparison_str}). Jelaskan secara objektif perbandingan Expected Return, Risiko, dan Sharpe Ratio antara MVEP, SIM, dan CAPM pada hasil perhitungan ini, serta mengapa {best_method} menjadi pemenang secara matematis.
+- Paragraf 4: Evaluasi profil risiko-imbal hasil ({ret_pct:.2f}% return vs {risk_pct:.2f}% risiko, Sharpe {sharpe:.3f}, Beta {beta_str}). {"Karena terdapat posisi bobot negatif (short selling) pada portofolio ini, jelaskan secara objektif mekanisme short selling pada saham terkait serta konsekuensi risiko asimetrisnya." if has_short else "Jelaskan bagaimana seluruh posisi long (beli) pada saham-saham tersebut memberikan eksposur pertumbuhan yang terukur terhadap pasar."}]
 
 ━━━━━━━━━━━━━━━━━━
 📊 DATA PENTING
@@ -133,19 +208,19 @@ potensi turun -Rp{loss_ex:,}
 ━━━━━━━━━━━━━━━━━━
 🎯 ISTILAH INVESTASI
 ━━━━━━━━━━━━━━━━━━
-* **Return**: Potensi keuntungan atau tingkat pengembalian yang diharapkan dari dana investasi Anda setiap tahunnya. Nilai {ret_pct:.1f}% menunjukkan proyeksi pertumbuhan portofolio Anda berdasarkan performa historis.
-* **Risk (Risiko)**: Volatilitas atau fluktuasi harga saham, menunjukkan potensi ketidakpastian nilai modal. Nilai {risk_pct:.1f}% mencerminkan potensi deviasi harga yang harus siap Anda toleransi demi mengejar keuntungan tersebut.
-* **Sharpe Ratio**: Ukuran efisiensi portofolio, membandingkan kelebihan return terhadap risiko yang diambil setelah dikompensasikan dengan BI Rate ({bi_rate}%). Nilai Sharpe Ratio sebesar {sharpe:.3f} menunjukkan efisiensi tinggi, di mana setiap unit risiko yang Anda tanggung menghasilkan return tambahan yang sangat optimal.
-* **Alpha**: Indikator performa portofolio di atas rata-rata pasar acuan. Alpha positif menandakan strategi alokasi Anda sukses mengalahkan pergerakan rata-rata pasar.
-* **Beta**: {beta_desc}
-* **Treynor Ratio**: Kinerja kelebihan return portofolio per unit risiko pasar (beta) yang diambil, memberikan perspektif efisiensi risiko sistemik.
+* **Return**: [Jelaskan arti Expected Return {ret_pct:.1f}% per tahun secara spesifik dibandingkan BI Rate {bi_rate}% dan simulasi +Rp{gain_ex:,}]
+* **Risk (Risiko)**: [Jelaskan arti volatilitas tahunan {risk_pct:.1f}% dan potensi deviasi nilai -Rp{loss_ex:,} pada modal Rp {investment_amount:,.0f}]
+* **Sharpe Ratio**: [Jelaskan arti nilai Sharpe Ratio {sharpe:.3f} pada portofolio {best_method} ini dengan acuan risk-free rate {bi_rate}%]
+* **Alpha**: [Jelaskan arti Alpha portofolio dalam mengukur nilai tambah pemilihan saham {index_upper} terhadap rata-rata pasar]
+* **Beta**: [Jelaskan arti Beta = {beta_str} terhadap sensitivitas IHSG {"serta pengaruh posisi short selling pada sensitivitas tersebut" if has_short else "dan karakter defensif/agresif portofolio ini"}]
+* **Treynor Ratio**: [Jelaskan peran Treynor Ratio dalam mengukur excess return per unit risiko sistematis (Beta)]
 
 ━━━━━━━━━━━━━━━━━━
 🏦 ALOKASI PORTOFOLIO
 ━━━━━━━━━━━━━━━━━━
-Sebagian besar dana ditempatkan pada saham dengan performa stabil dan potensi return yang baik. Komposisi alokasi saham pilihan Anda adalah:
+Komposisi alokasi saham pilihan hasil optimasi {best_method}:
 {alloc_str}
-Dengan modal awal sebesar Rp{investment_amount:,.0f}, potensi keuntungan Anda diperkirakan mencapai +Rp{gain_ex:,} dengan potensi penurunan risiko sekitar -Rp{loss_ex:,}.
+Dengan modal awal sebesar Rp{investment_amount:,.0f}, proyeksi potensi imbal hasil tahunan berada di kisaran +Rp{gain_ex:,} dengan batas toleransi risiko tahunan sekitar -Rp{loss_ex:,}.
 
 ━━━━━━━━━━━━━━━━━━
 📌 PERBANDINGAN METODE LAIN
@@ -156,132 +231,81 @@ Perbandingan skor metode optimasi portofolio Anda:
 ━━━━━━━━━━━━━━━━━━
 💡 Beberapa tips yang harus Kamu lakukan:
 ━━━━━━━━━━━━━━━━━━
-👉 Lakukan diversifikasi secara disiplin dan jangan menaruh seluruh dana Anda pada satu saham saja demi mengurangi risiko volatilitas.
-👉 Selalu cek dan lakukan rebalancing portofolio secara berkala minimal 3 hingga 6 bulan sekali guna menyesuaikan dengan tren pasar terbaru.
-👉 Gunakan dana dingin yang aman dan pastikan dana darurat Anda telah terpenuhi sebelum memulai komitmen investasi jangka panjang.
-
-⚠️ Ini bukan jaminan keuntungan, hanya proyeksi berdasarkan data historis pasar."""
-
-    key = os.getenv("GEMINI_API_KEY_ANALYSIS") or os.getenv("GEMINI_API_KEY")
-    if not key or key.strip() == "":
-        return fallback_text
-
-    try:
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-
-        prompt = f"""
-Kamu adalah AI Financial Assistant SmartInvest 📈
-Tugasmu adalah menjelaskan hasil analisis portofolio saham kepada investor pemula menggunakan Bahasa Indonesia yang santai, sederhana, edukatif, dan mudah dipahami.
-
-Gunakan gaya seperti financial advisor modern yang friendly dan sangat membantu, bukan seperti laporan akademik yang kaku. 
-
-━━━━━━━━━━━━━━━━━━
-📊 DATA ANALISIS
-━━━━━━━━━━━━━━━━━━
-Metode terbaik: {best_method}
-Indeks acuan: {index_desc}
-BI Rate: {bi_rate}%
-Kondisi IHSG: {market_trend_str}
-Periode historis data: {horizon_yr} tahun
-Alokasi Modal Awal: Rp {investment_amount:,.0f}
-
-━━━━━━━━━━━━━━━━━━
-🏆 HASIL PORTOFOLIO TERBAIK
-━━━━━━━━━━━━━━━━━━
-Expected Return: {ret_pct:.1f}% per tahun
-Risk / Volatilitas: {risk_pct:.1f}% per tahun
-Sharpe Ratio: {sharpe:.3f}
-Beta: {f'{beta:.2f}' if beta is not None else 'N/A'}
-
-Simulasi Investasi:
-Modal Rp {investment_amount:,.0f}
-Potensi keuntungan: +Rp{gain_ex:,}
-Potensi penurunan: -Rp{loss_ex:,}
-Komposisi saham:
-{alloc_str}
-
-━━━━━━━━━━━━━━━━━━
-📌 PERBANDINGAN METODE
-━━━━━━━━━━━━━━━━━━
-{comparison_str}
-
-━━━━━━━━━━━━━━━━━━
-🎯 FORMAT OUTPUT WAJIB
-━━━━━━━━━━━━━━━━━━
-1. Awali dengan persis:
-   👋 Hallo Sobat SmartInvest!
-
-2. Gunakan emoji agar lebih menarik, bersahabat, dan modern.
-
-3. WAJIB tulis bagian pendahuluan dalam tepat 4 paragraf yang sangat panjang, padat, mendalam, dan kaya informasi (masing-masing paragraf minimal 5-6 kalimat panjang):
-   - Paragraf 1: Sambutan hangat dan kasual. Sebutkan modal awal Rp {investment_amount:,.0f}, BI Rate {bi_rate}%, data historis {horizon_yr} tahun, indeks acuan {index_desc} beserta penjelasan singkat apa itu indeks tersebut dan mengapa saham-sahamnya berkualitas, serta metode terbaik ({best_method}) yang terpilih untuk kondisi IHSG ({market_trend_str}).
-   - Paragraf 2: Analisis mendalam tentang input pengguna. Jelaskan mengapa modal Rp {investment_amount:,.0f} adalah langkah awal yang luar biasa, apa peran BI Rate {bi_rate}% sebagai risk-free rate, dan bagaimana data historis {horizon_yr} tahun menguji keandalan portofolio ini.
-   - Paragraf 3: Kupas tuntas metode {best_method} yang terpilih. Jelaskan secara detail cara kerja algoritmanya, kelebihan metode ini dibanding metode lain, dan mengapa ia paling cocok untuk kondisi pasar {market_trend_str} saat ini. Sertakan penjelasan edukatif tentang apa itu metode {best_method} agar investor pemula paham.
-   - Paragraf 4: Bedah metrik utama: Expected Return ({ret_pct:.1f}%), Risiko ({risk_pct:.1f}%), dan Sharpe Ratio ({sharpe:.3f}). JIKA ada bobot negatif (short selling), jelaskan secara mendalam dan edukatif bagaimana mekanisme short selling bekerja (meminjam saham → menjual → membeli kembali lebih murah → profit dari selisih), potensi keuntungannya, dan peringatan risiko tingginya (potensi kerugian tak terbatas jika harga naik).
-   - Jangan mencantumkan confidence score AI!
-
-4. Tampilkan bagian angka penting secara persis seperti format di bawah ini (WAJIB SATU BARIS SATU ITEM):
-
-━━━━━━━━━━━━━━━━━━
-📊 DATA PENTING
-━━━━━━━━━━━━━━━━━━
-💰 Expected Return: {ret_pct:.1f}% per tahun
-
-📉 Risiko: {risk_pct:.1f}% per tahun
-
-🎯 Sharpe Ratio: {sharpe:.3f}
-
-💸 Simulasi:
-potensi untung +Rp{gain_ex:,}
-potensi turun -Rp{loss_ex:,}
-
-5. Tampilkan bagian glosarium istilah secara terperinci dan edukatif di bawah ini (WAJIB FORMAT SEPERTI INI):
-
-━━━━━━━━━━━━━━━━━━
-🎯 ISTILAH INVESTASI
-━━━━━━━━━━━━━━━━━━
-* **Return**: Potensi keuntungan atau tingkat pengembalian yang diharapkan dari dana investasi Anda setiap tahunnya. Nilai {ret_pct:.1f}% menunjukkan proyeksi pertumbuhan portofolio Anda berdasarkan performa historis.
-* **Risk (Risiko)**: Tingkat volatilitas atau fluktuasi pergerakan harga saham, menunjukkan potensi ketidakpastian nilai modal. Nilai {risk_pct:.1f}% mencerminkan potensi deviasi harga yang harus siap Anda toleransi demi mengejar keuntungan tersebut.
-* **Sharpe Ratio**: Ukuran efisiensi portofolio, membandingkan kelebihan return terhadap risiko yang diambil setelah dikompensasikan dengan BI Rate ({bi_rate}%). Nilai Sharpe Ratio sebesar {sharpe:.3f} menunjukkan tingkat efisiensi alokasi Anda.
-* **Alpha**: Indikator performa portofolio di atas rata-rata pasar acuan. Alpha positif menandakan strategi alokasi Anda sukses mengalahkan pergerakan rata-rata pasar.
-* **Beta**: Tingkat sensitivitas pergerakan nilai portofolio Anda terhadap indeks pasar IHSG secara keseluruhan (Beta = {f'{beta:.2f}' if beta is not None else 'N/A'}). JIKA ada posisi short selling di portofolio, jelaskan efeknya terhadap sensitivitas pasar.
-* **Treynor Ratio**: Kinerja kelebihan return portofolio per unit risiko pasar (beta) yang diambil.
-
-6. Tampilkan bagian alokasi portofolio secara terperinci di bawah ini:
-
-━━━━━━━━━━━━━━━━━━
-🏦 ALOKASI PORTOFOLIO
-━━━━━━━━━━━━━━━━━━
-Sebagian besar dana ditempatkan pada saham dengan performa stabil dan potensi return yang baik. Komposisi alokasi saham pilihan Anda adalah:
-{alloc_str}
-Dengan modal awal sebesar Rp{investment_amount:,.0f}, potensi keuntungan Anda diperkirakan mencapai +Rp{gain_ex:,} dengan potensi penurunan risiko sekitar -Rp{loss_ex:,}.
-
-7. Tampilkan bagian perbandingan metode secara terperinci di bawah ini:
-
-━━━━━━━━━━━━━━━━━━
-📌 PERBANDINGAN METODE LAIN
-━━━━━━━━━━━━━━━━━━
-Perbandingan skor metode optimasi portofolio Anda:
-{comparison_str}
-
-8. Tampilkan bagian tips secara persis seperti format di bawah ini:
-
-━━━━━━━━━━━━━━━━━━
-💡 Beberapa tips yang harus Kamu lakukan:
-━━━━━━━━━━━━━━━━━━
-👉 Lakukan diversifikasi secara disiplin dan jangan menaruh seluruh dana Anda pada satu saham saja demi mengurangi risiko volatilitas.
-👉 Selalu cek dan lakukan rebalancing portofolio secara berkala minimal 3 hingga 6 bulan sekali guna menyesuaikan dengan tren pasar terbaru.
-👉 Gunakan dana dingin yang aman dan pastikan dana darurat Anda telah terpenuhi sebelum memulai komitmen investasi jangka panjang.
-
-9. Tutup dengan disclaimer berikut secara persis:
+👉 [Tulis 1 strategi konkret terkait pengelolaan bobot saham dominan yang ada di portofolio ini]
+👉 [Tulis 1 strategi konkret terkait jadwal evaluasi/rebalancing menghadapi tren IHSG {market_trend_str} dan BI Rate {bi_rate}%]
+👉 [Tulis 1 strategi manajemen risiko/batas toleransi kerugian untuk modal Rp {investment_amount:,.0f} {"khususnya pengawasan ketat posisi short selling" if has_short else "secara bertahap"}]
 
 ⚠️ Ini bukan jaminan keuntungan, hanya proyeksi berdasarkan data historis pasar.
 """
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception:
-        return fallback_text
+
+    ai_text = _call_gemini(prompt, custom_api_key=gemini_api_key, key_env_var="GEMINI_API_KEY_ANALYSIS")
+    if ai_text:
+        return ai_text
+
+    # Dynamic data-driven fallback (tanpa kata-kata alay/template kaku) jika API Key belum disetel
+    top_tickers = _parse_top_tickers_from_alloc(alloc_str)
+    top_names = ", ".join([f"{t} ({w:.1f}%)" for t, w in top_tickers[:3]]) if top_tickers else "saham-saham berfundamental utama"
+
+    short_note = (
+        f"Terdapat posisi bobot negatif (short selling) dalam hasil optimasi ini untuk memanfaatkan koreksi harga pada emiten tertentu sekaligus menjadi penyeimbang (hedging) terhadap fluktuasi pasar."
+        if has_short
+        else f"Seluruh alokasi ditempatkan pada posisi beli (long position) dengan fokus pada emiten berlikuiditas tinggi di indeks {index_upper}."
+    )
+
+    return f"""👋 Hallo Sobat SmartInvest!
+
+Berdasarkan simulasi kuantitatif pada modal investasi sebesar Rp {investment_amount:,.0f} menggunakan data historis selama {horizon_yr} tahun terakhir dan acuan suku bunga BI Rate {bi_rate}%, algoritma **{best_method}** terpilih sebagai metode paling optimal untuk merespons kondisi IHSG yang sedang bergerak **{market_trend_str}**. Pemilihan kandidat saham difokuskan pada indeks **{index_desc}** guna menjaga standar likuiditas dan kualitas fundamental portofolio.
+
+Dalam struktur alokasi yang terbentuk, bobot portofolio dipimpin oleh **{top_names}** yang memiliki rasio imbal hasil terhadap risiko paling efisien selama periode pengamatan. Dengan proyeksi Expected Return tahunan sebesar **{ret_pct:.1f}%** (memberikan premi imbal hasil sebesar **{spread_vs_bi:+.1f}%** di atas BI Rate {bi_rate}%) dan volatilitas tahunan sebesar **{risk_pct:.1f}%**, portofolio ini mencatatkan Sharpe Ratio sebesar **{sharpe:.3f}**.
+
+Pemilihan metode **{best_method}** didasarkan pada evaluasi objektif terhadap perbandingan metrik ketiga model optimasi (MVEP, SIM, dan CAPM). Pada kondisi pasar **{market_trend_str}**, pendekatan {best_method} memberikan keseimbangan paling rasional antara pencapaian target pertumbuhan modal (+Rp{gain_ex:,}) dan pengendalian batas risiko (-Rp{loss_ex:,}).
+
+{short_note} Tingkat sensitivitas portofolio terhadap pergerakan pasar tercermin pada nilai Beta sebesar **{beta_str}**, yang menjadi indikator penting bagi Anda dalam memantau respons portofolio terhadap dinamika makroekonomi domestik.
+
+━━━━━━━━━━━━━━━━━━
+📊 DATA PENTING
+━━━━━━━━━━━━━━━━━━
+💰 Expected Return: {ret_pct:.1f}% per tahun
+
+📉 Risiko: {risk_pct:.1f}% per tahun
+
+🎯 Sharpe Ratio: {sharpe:.3f}
+
+💸 Simulasi:
+potensi untung +Rp{gain_ex:,}
+potensi turun -Rp{loss_ex:,}
+
+━━━━━━━━━━━━━━━━━━
+🎯 ISTILAH INVESTASI
+━━━━━━━━━━━━━━━━━━
+* **Return**: Proyeksi tingkat pengembalian tahunan sebesar {ret_pct:.1f}% (setara +Rp{gain_ex:,} dari modal Rp {investment_amount:,.0f}) berdasarkan rata-rata kinerja historis saham terpilih.
+* **Risk (Risiko)**: Standar deviasi atau volatilitas tahunan sebesar {risk_pct:.1f}% (setara rentang fluktuasi ±Rp{loss_ex:,}) yang menggambarkan tingkat simpangan harga historis.
+* **Sharpe Ratio**: Rasio efisiensi risiko sebesar {sharpe:.3f} setelah memperhitungkan beban suku bunga bebas risiko (BI Rate {bi_rate}%). Semakin tinggi nilai ini, semakin optimal kompensasi imbal hasil per unit risiko.
+* **Alpha**: Ukuran kelebihan imbal hasil (excess return) portofolio dibandingkan imbal hasil ekspektasi pasar pada tingkat risiko sistematis yang sama.
+* **Beta**: Tingkat kepekaan portofolio terhadap pergerakan IHSG (Beta = {beta_str}). Nilai di bawah 1 menunjukkan fluktuasi yang lebih teredam dibanding indeks pasar.
+* **Treynor Ratio**: Pengukur efisiensi kelebihan return portofolio di atas BI Rate dibagi dengan risiko sistematis (Beta).
+
+━━━━━━━━━━━━━━━━━━
+🏦 ALOKASI PORTOFOLIO
+━━━━━━━━━━━━━━━━━━
+Komposisi alokasi saham pilihan Anda adalah:
+{alloc_str}
+Dengan modal awal sebesar Rp{investment_amount:,.0f}, potensi keuntungan tahunan diperkirakan mencapai +Rp{gain_ex:,} dengan potensi risiko fluktuasi sekitar -Rp{loss_ex:,}.
+
+━━━━━━━━━━━━━━━━━━
+📌 PERBANDINGAN METODE LAIN
+━━━━━━━━━━━━━━━━━━
+Perbandingan skor metode optimasi portofolio Anda:
+{comparison_str}
+
+━━━━━━━━━━━━━━━━━━
+💡 Beberapa tips yang harus Kamu lakukan:
+━━━━━━━━━━━━━━━━━━
+👉 Pantau secara berkala kinerja emiten berbobat terbesar ({top_names}) dan pastikan fundamentalnya tetap selaras dengan tren sektoral.
+👉 Lakukan evaluasi ulang (rebalancing) setiap 3 hingga 6 bulan untuk menyesuaikan bobot portofolio terhadap perubahan BI Rate ({bi_rate}%) dan arah tren IHSG.
+👉 Terapkan batas toleransi risiko secara disiplin sesuai profil modal kerja Rp {investment_amount:,.0f} dan hindari keputusan emosional saat terjadi fluktuasi harian.
+
+⚠️ Ini bukan jaminan keuntungan, hanya proyeksi berdasarkan data historis pasar."""
 
 
 # ==============================================================================
@@ -295,210 +319,75 @@ def generate_analysis_summary(
     stock_details,
     model_choice="CAPM",
     investment_amount=10000000,
-    index_choice="LQ45"  # ⚡ PARAMETER BARU
+    index_choice="LQ45",
+    annual_return=None,
+    annual_risk=None,
+    sharpe_ratio=None,
+    bi_rate=None,
+    alpha=None,
+    beta=None,
+    gemini_api_key: str = None,
 ):
     has_short = "-" in portfolio_allocation
-
-    # ==========================
-    # DESKRIPSI INDEX
-    # ==========================
     index_upper = index_choice.upper() if index_choice else "LQ45"
+
     if index_upper == "LQ45":
         index_desc = "LQ45"
-        index_full_desc = (
-            "LQ45 adalah indeks yang terdiri dari 45 saham paling likuid dan berkapitalisasi pasar terbesar "
-            "di Bursa Efek Indonesia (BEI). Saham-saham dalam indeks ini dipilih berdasarkan volume transaksi "
-            "harian tertinggi, kapitalisasi pasar terbesar, dan memiliki rekam jejak fundamental yang kuat. "
-            "Dengan memilih universe LQ45, portofoliomu hanya berinvestasi pada saham-saham blue-chip kelas satu "
-            "yang paling diminati investor institusional maupun ritel di Indonesia."
-        )
+        index_full_desc = "indeks 45 emiten paling likuid dengan kapitalisasi pasar terbesar di Bursa Efek Indonesia (BEI)"
     elif index_upper in ["IDX30", "IDX 30"]:
         index_desc = "IDX30"
-        index_full_desc = (
-            "IDX30 adalah indeks yang terdiri dari 30 saham terpilih dengan likuiditas tertinggi dan fundamental "
-            "paling solid di Bursa Efek Indonesia (BEI). Indeks ini merupakan representasi terbaik dari saham-saham "
-            "blue-chip Indonesia yang secara konsisten menjadi pilihan utama investor besar. "
-            "Dengan memilih universe IDX30, portofoliomu terkonsentrasi pada 30 emiten terkuat di bursa, "
-            "sehingga setiap saham yang masuk ke portofolio merupakan pilihan premium berkualitas tinggi."
-        )
+        index_full_desc = "indeks 30 saham blue-chip utama dengan seleksi fundamental dan likuiditas terketat di BEI"
     else:
         index_desc = index_upper
-        index_full_desc = (
-            f"Indeks {index_upper} digunakan sebagai universe saham kandidat portofolio, "
-            "memastikan hanya saham-saham terpilih dengan kriteria ketat yang masuk ke dalam perhitungan alokasi."
-        )
+        index_full_desc = f"indeks {index_upper} di Bursa Efek Indonesia"
 
-    # ==========================
-    # DESKRIPSI MODEL/METODE
-    # ==========================
     if model_choice == "SIM":
-        model_desc = (
-            "SIM (Single Index Model) adalah metode optimasi portofolio yang mengukur hubungan antara return "
-            "setiap saham dengan return indeks pasar (IHSG). Model ini menghitung nilai Beta (sensitivitas saham "
-            "terhadap pasar) dan Alpha (excess return di atas pasar) untuk setiap emiten, lalu mengoptimalkan "
-            "bobot alokasi agar portofolio mendapatkan rasio Sharpe tertinggi. SIM sangat efektif di kondisi "
-            "pasar Bullish karena mampu memaksimalkan return sambil mengelola risiko sistematis secara presisi."
-        )
+        model_desc = "Single Index Model (SIM), yang mengoptimalkan rasio excess return terhadap beta pasar (cut-off rate C*) untuk menangkap momentum pertumbuhan saham terhadap IHSG"
     elif model_choice == "MVEP":
-        model_desc = (
-            "MVEP (Minimum Variance Efficient Portfolio) adalah metode optimasi yang berfokus pada meminimalkan "
-            "risiko (volatilitas) portofolio secara keseluruhan. Algoritma ini menggunakan matriks kovarians antar "
-            "saham untuk menemukan kombinasi bobot yang menghasilkan volatilitas paling rendah sambil tetap "
-            "mempertahankan potensi return yang wajar. MVEP sangat cocok untuk kondisi pasar Sideways atau tidak "
-            "pasti karena strategi utamanya adalah melindungi modal dari fluktuasi harga yang berlebihan."
-        )
+        model_desc = "Minimum Variance Efficient Portfolio (MVEP), yang meminimalkan varians total portofolio melalui matriks kovarians antar-saham untuk meredam volatilitas"
     elif model_choice == "CAPM":
-        model_desc = (
-            "CAPM (Capital Asset Pricing Model) adalah model klasik yang menghitung expected return setiap saham "
-            "berdasarkan hubungannya dengan risiko pasar (Beta) dan BI Rate sebagai risk-free rate. Model ini "
-            "memilih saham-saham yang memberikan kompensasi return paling optimal untuk setiap unit risiko yang "
-            "ditanggung investor. CAPM sangat defensif dan cocok untuk kondisi pasar Bearish karena berfokus pada "
-            "saham-saham dengan profil risiko terukur dan valuasi yang wajar berdasarkan teori pasar efisien."
-        )
+        model_desc = "Capital Asset Pricing Model (CAPM), yang mengevaluasi keseimbangan imbal hasil terhadap risiko sistematis (Beta) dan suku bunga bebas risiko (BI Rate)"
     else:
-        model_desc = (
-            f"Model {model_choice} digunakan sebagai algoritma optimasi portofolio untuk menyusun bobot alokasi "
-            "saham secara matematis berdasarkan data historis return dan risiko masing-masing emiten."
+        model_desc = f"algoritma optimasi kuantitatif {model_choice}"
+
+    metrics_context = ""
+    if annual_return is not None and annual_risk is not None and sharpe_ratio is not None:
+        metrics_context = (
+            f"\nMetrik Kuantitatif Hasil Perhitungan:\n"
+            f"- Expected Return Tahunan: {annual_return:.2f}%\n"
+            f"- Risiko / Volatilitas Tahunan: {annual_risk:.2f}%\n"
+            f"- Sharpe Ratio: {sharpe_ratio:.3f}\n"
+            f"- BI Rate Acuan: {bi_rate if bi_rate is not None else 'N/A'}%\n"
+            f"- Alpha Rata-rata: {alpha if alpha is not None else 'N/A'}\n"
+            f"- Beta Rata-rata: {beta if beta is not None else 'N/A'}\n"
         )
 
-    # ==========================
-    # SHORT SELLING DESCRIPTIONS
-    # ==========================
-    if has_short:
-        short_selling_intro = (
-            "Strategi Short Selling (Posisi Jual Kosong) Terdeteksi di Portofolio Ini! "
-            "Short selling adalah strategi investasi canggih di mana investor meminjam saham dari broker, "
-            "langsung menjualnya di harga pasar saat ini, kemudian menunggu harga saham turun untuk "
-            "membelinya kembali di harga yang lebih murah. Keuntungan diperoleh dari selisih harga jual "
-            "dan harga beli kembali tersebut. Misalnya: saham A dijual di harga Rp 5.000, lalu dibeli "
-            "kembali di harga Rp 4.000 — keuntungan Rp 1.000 per lembar saham diraih tanpa memiliki "
-            "sahamnya sama sekali! Namun perlu diingat, strategi ini memiliki risiko kerugian yang secara "
-            "teoritis tidak terbatas karena harga saham bisa naik tanpa batas, sehingga wajib dilengkapi "
-            "dengan stop-loss yang ketat dan manajemen risiko aktif setiap saat."
-        )
-        p4_text = (
-            f"Hasil analisis performa portofolio ini dirancang secara taktis untuk memberikan tingkat efisiensi "
-            f"yang maksimal bagi modal kerja investasimu dengan memanfaatkan peluang dari segala arah pergerakan pasar. "
-            f"Melalui integrasi strategi **short-selling** (bobot negatif), dana awalmu tidak hanya diposisikan untuk "
-            f"meraup untung saat pasar naik, tetapi juga siap memanfaatkan koreksi harga saham tertentu guna melindungi "
-            f"nilai portofoliomu. Mekanismenya adalah: sistem meminjam saham dari broker → menjualnya di harga tinggi saat "
-            f"ini → menunggu harga turun → membeli kembali di harga lebih murah → keuntungan berasal dari selisih harga "
-            f"tersebut. Dengan kombinasi dinamis posisi long dan short ini, portofoliomu lebih tahan terhadap berbagai "
-            f"skenario pergerakan pasar! ⚠️ Ingat: short selling memiliki risiko kerugian tak terbatas jika harga saham "
-            f"justru naik, sehingga sangat disarankan hanya untuk investor berpengalaman dengan toleransi risiko tinggi. 💸🔥"
-        )
-        p3_bullet = (
-            "* **Strategi Posisi & Karakter Portofolio**: Portofoliomu kali ini terdeteksi menggunakan strategi "
-            "**Short Selling** (posisi bobot negatif) pada beberapa emiten pilihan. 😉 Short selling bekerja dengan "
-            "cara meminjam saham dari broker dan langsung menjualnya, dengan harapan harga akan turun sehingga bisa "
-            "dibeli kembali lebih murah dan selisihnya menjadi keuntungan. Strategi ini sangat taktis dan cocok "
-            "untuk menghasilkan profit di tengah tren penurunan harga saham tertentu. Namun perlu diwaspadai: "
-            "risiko short selling bersifat asimetris — potensi keuntungan terbatas (harga hanya bisa turun ke nol) "
-            "sementara potensi kerugian teoritis tidak terbatas (harga bisa naik tanpa batas). Karena itu, strategi "
-            "ini **hanya direkomendasikan untuk investor berpengalaman** yang memahami manajemen risiko secara aktif, "
-            "menggunakan stop-loss, dan memantau posisi secara real-time. 📈🔥"
-        )
-    else:
-        short_selling_intro = ""
-        p4_text = (
-            f"Hasil analisis performa portofolio ini dirancang secara taktis untuk memberikan tingkat efisiensi "
-            f"yang maksimal bagi modal kerja investasimu. Dana awalmu didistribusikan ke berbagai sektor industri "
-            f"utama secara proporsional guna menciptakan pertahanan portofolio yang seimbang terhadap guncangan "
-            f"sektoral mendadak. Seluruh posisi menggunakan strategi long position standar, di mana keuntungan "
-            f"diraih ketika harga saham naik seiring waktu. Kamu bisa berinvestasi dengan tenang dan penuh "
-            f"keyakinan karena portofoliomu didukung oleh analisis kuantitatif modern yang tangguh dan profesional! 💸🔥"
-        )
-        p3_bullet = (
-            "* **Strategi Posisi & Karakter Portofolio**: Seluruh portofolio Anda dikelola dengan strategi "
-            "**long position** standar, yang berarti keuntungan didapatkan secara alami ketika harga saham "
-            "naik seiring pertumbuhan fundamental perusahaan dan ekonomi makro Indonesia. Profil portofolio "
-            "Anda dikategorikan sebagai **moderat-stabil**, karena berfokus pada saham-saham berkinerja "
-            "konsisten dengan pertumbuhan terarah dari indeks {index_desc}. Kombinasi ini memberikan "
-            "keseimbangan yang ideal antara potensi imbal hasil dengan tingkat volatilitas pasar jangka menengah, "
-            "sangat cocok untuk investor yang menginginkan pertumbuhan modal terukur tanpa eksposur risiko ekstrem."
-        ).format(index_desc=index_desc)
+    prompt = f"""Kamu adalah Senior Quantitative Portfolio Analyst di SmartInvest.
+Tugasmu adalah menyusun laporan analisis struktur portofolio yang **100% spesifik, objektif, mendalam, dan langsung membedah emiten serta angka aktual** di bawah ini.
 
-    fallback_text = f"""👋 Hallo Sobat SmartInvest! 🚀
+ATURAN GAYA BAHASA (WAJIB DIPATUHI):
+- JANGAN PERNAH menggunakan kata-kata slang/klise seperti "gokil", "gercep", "anti-boncos", "cuan melimpah", "Wah, seru banget nih!", atau "Hasilnya mantap banget!".
+- Jangan menyalin kalimat template. Buat analisis yang benar-benar merujuk pada nama-nama saham, persentase bobot, sektor industri, dan status tren teknikal (Bullish/Bearish/Sideways) yang tertulis di DATA PORTOFOLIO.
+- DILARANG menyebutkan prediksi arah IHSG atau confidence score IHSG di halaman ini (fokus murni pada bedah portofolio, metode {model_choice}, dan saham-saham penyusunnya).
 
-Wah, seru banget nih! Berdasarkan parameter input yang baru saja kamu tentukan, kamu sedang menganalisis optimasi portofolio dengan total modal investasi sebesar **Rp {investment_amount:,.0f}** menggunakan model alokasi **{model_choice}**! 🎯 AI kita langsung gercep menarik dan memproses data bursa historis komprehensif selama rentang periode **{historical_period}** biar pembagian bobot aset sahammu terpetakan secara optimal dan anti-boncos! 📈
-
-Kamu memilih indeks **{index_desc}** sebagai universe kandidat saham portofoliomu. {index_full_desc} Hal ini memastikan setiap saham yang masuk ke portofoliomu telah melewati seleksi ketat berdasarkan likuiditas, kapitalisasi, dan rekam jejak fundamental di bursa! 🏆
-
-{model_desc} Model ini bekerja keras di balik layar untuk memastikan setiap rupiah modalmu dialokasikan pada proporsi yang paling efisien secara matematis! 🛡️💼
-
-{p4_text}
-
-━━━━━━━━━━━━━━━━━━
-📊 KOMPOSISI PORTOFOLIO
-━━━━━━━━━━━━━━━━━━
-Portofolio Anda saat ini dialokasikan pada saham-saham pilihan sebagai berikut:
-{portfolio_allocation}
-
-Detail saham yang menyusun portofolio Anda beserta sektor dan status tren teknikalnya:
+DATA PORTOFOLIO AKTUAL:
+- Metode Optimasi: {model_choice} ({model_desc})
+- Indeks Universe: {index_desc} ({index_full_desc})
+- Modal Kerja Investasi: Rp {investment_amount:,.0f}
+- Rentang Data Historis: {historical_period}{metrics_context}
+- Ringkasan Bobot Saham: {portfolio_allocation}
+- Rincian Emiten, Sektor, dan Tren Teknikal:
 {stock_details}
 
-━━━━━━━━━━━━━━━━━━
-🛡️ ANALISIS FINANSIAL
-━━━━━━━━━━━━━━━━━━
-* **Analisis Alokasi & Dominasi Bobot**: Alokasi bobot portofolio Anda dihitung menggunakan model matematis kuantitatif ({model_choice}) guna menyeimbangkan porsi risiko secara optimal. Saham dengan fundamental kokoh dan tren harga stabil cenderung diberikan porsi bobot yang lebih dominan guna bertindak sebagai penyangga (buffer) utama portofolio. Hal ini membantu meminimalisasi potensi guncangan modal Anda ketika pasar saham mengalami koreksi mendadak, sehingga dana investasi Anda tetap berkembang secara sehat.
-* **Diversifikasi Sektor & Risiko Konsentrasi**: Portofolio Anda didistribusikan secara taktis di berbagai sektor industri berbeda (seperti keuangan, energi, komoditas, infrastruktur, atau barang konsumsi) untuk mengurangi risiko konsentrasi yang berlebihan pada satu emiten tunggal. Seluruh saham kandidat berasal dari universe indeks **{index_desc}** yang merupakan emiten-emiten terpilih berkualitas tinggi. Ketika terjadi fluktuasi pada satu sektor industri tertentu, sektor lain yang tetap kokoh atau tumbuh akan menyeimbangkan kinerja keseluruhan aset investasi Anda secara efisien.
-{p3_bullet}
+STRUKTUR OUTPUT WAJIB (Pertahankan header bagian dan tanda pemisah di bawah ini secara persis agar parser visual aplikasi berfungsi sempurna):
 
-━━━━━━━━━━━━━━━━━━
-💡 Strategi yang Bisa Dipertimbangkan
-━━━━━━━━━━━━━━━━━━
-👉 Tetap tenang dan hindari keputusan impulsif saat pasar berfluktuasi jangka pendek.
-👉 Lakukan diversifikasi ke sektor-sektor non-komoditas lainnya untuk mengurangi ekspresi risiko pasar.
-👉 Evaluasi berkala bobot saham terbesar Anda dan sesuaikan kembali (rebalancing) bila ada berita industri terbaru.
-
-⚠️ Analisis ini merupakan proyeksi berdasarkan data historis dan bukan jaminan keuntungan investasi."""
-
-    key = os.getenv("GEMINI_API_KEY_ANALYSIS") or os.getenv("GEMINI_API_KEY")
-    if not key or key.strip() == "":
-        return fallback_text
-
-    try:
-        genai.configure(api_key=key)
-        model = genai.GenerativeModel("gemini-2.5-flash")
-
-        prompt = f"""
-Kamu adalah AI Portfolio Advisor SmartInvest 📊
-Tugasmu adalah menjelaskan kondisi dan struktur portofolio saham menggunakan Bahasa Indonesia yang santai, profesional, mendalam, mudah dipahami investor pemula, dan terasa seperti analisis dari financial advisor modern berpengalaman.
-
-Jangan terlalu fokus menjelaskan model AI atau teknikal machine learning, melainkan fokuslah pada edukasi finansial dan analisis saham praktis.
-
-━━━━━━━━━━━━━━━━━━
-📊 DATA PORTOFOLIO
-━━━━━━━━━━━━━━━━━━
-Model Alokasi: {model_choice}
-Indeks Acuan: {index_desc} — {index_full_desc}
-Alokasi Modal Awal: Rp {investment_amount:,.0f}
-Periode data historis: {historical_period}
-Komposisi portofolio: {portfolio_allocation}
-Detail saham: {stock_details}
-
-━━━━━━━━━━━━━━━━━━
-📌 INFORMASI TAMBAHAN
-━━━━━━━━━━━━━━━━━━
-* Deskripsi metode {model_choice}: {model_desc}
-* Saham dapat memiliki label: 📈 Bullish, 📉 Bearish, ➖ Stabil / Sideways
-* Bobot negatif berarti sistem menggunakan strategi short selling (jual kosong).
-{f"* INFO SHORT SELLING: {short_selling_intro}" if has_short else ""}
-
-━━━━━━━━━━━━━━━━━━
-🎯 FORMAT OUTPUT WAJIB
-━━━━━━━━━━━━━━━━━━
-1. Awali dengan persis:
 👋 Hallo Sobat SmartInvest!
 
-2. Tulis tepat 4 paragraf pembuka yang sangat panjang, padat, mendalam, dan kaya informasi (masing-masing paragraf minimal 5-6 kalimat panjang):
-   - Paragraf 1: Sambutan hangat dan kasual. Sebutkan modal investasi Rp {investment_amount:,.0f}, model alokasi {model_choice}, dan rentang periode historis data {historical_period}. Perkenalkan indeks {index_desc} dan jelaskan mengapa saham-sahamnya berkualitas tinggi sebagai universe investasi.
-   - Paragraf 2: Analisis mendalam tentang input pengguna. Jelaskan mengapa modal Rp {investment_amount:,.0f} merupakan basis modal kerja yang kuat, dan bagaimana rentang data historis {historical_period} memberikan keandalan statistik yang kokoh untuk memetakan alokasi portofolio.
-   - Paragraf 3: Kupas tuntas metode {model_choice} secara mendalam dan edukatif. Gunakan deskripsi berikut sebagai referensi: {model_desc}. Jelaskan cara kerja algoritma ini step-by-step, kelebihan utamanya, dan mengapa ia paling optimal untuk menyusun portofolio dari universe {index_desc}.
-   - Paragraf 4: Analisis efisiensi alokasi risiko portofolio secara menyeluruh. Terangkan bahwa portofolio ini terdistribusi taktis ke berbagai sektor industri utama dari universe {index_desc}. JIKA ada bobot negatif (strategi short selling), jelaskan secara sangat gamblang dan mendalam bagaimana mekanisme short selling bekerja (meminjam saham → menjual di harga tinggi → menunggu turun → beli kembali lebih murah → profit dari selisih), jelaskan potensi keuntungan dan peringatan risiko tak terbatasnya agar investor pemula benar-benar paham.
-   - DILARANG mencantumkan prediksi IHSG, kondisi makro IHSG, trend pasar, atau confidence score AI di halaman ini!
-
-3. Tampilkan bagian daftar komposisi portofolio secara persis seperti format di bawah ini:
+[Tulis 4 paragraf pembuka yang kaya analisis, profesional, dan spesifik (masing-masing 4-6 kalimat):
+- Paragraf 1: Konteks optimasi portofolio. Jelaskan bagaimana modal Rp {investment_amount:,.0f} dialokasikan menggunakan model {model_choice} pada universe {index_desc} berdasarkan data historis periode {historical_period}{f", menghasilkan proyeksi return tahunan {annual_return:.2f}% dengan tingkat risiko {annual_risk:.2f}% dan Sharpe Ratio {sharpe_ratio:.3f}" if annual_return is not None else ""}.
+- Paragraf 2: Bedah komposisi saham teratas secara langsung. Sebutkan nama-nama saham dengan bobot terbesar dari daftar ({portfolio_allocation}), sektor industrinya, serta bagaimana sinyal tren teknikal masing-masing saham tersebut berkontribusi terhadap portofolio.
+- Paragraf 3: Kupas cara kerja matematis metode {model_choice} pada portofolio ini. Jelaskan bagaimana {model_choice} menyeleksi dan memberi bobot pada emiten-emiten di atas (mengapa saham tertentu mendapat porsi dominan sedangkan yang lain lebih kecil).
+- Paragraf 4: Evaluasi struktur eksposur dan manajemen risiko. {"Karena terdapat bobot negatif (short selling) pada portofolio ini, jelaskan secara jernih saham mana yang di-short, bagaimana mekanisme short selling bekerja sebagai lindung nilai/taktis, serta risiko asimetrisnya." if has_short else f"Jelaskan bagaimana kombinasi posisi long (beli) lintas sektor pada indeks {index_desc} ini menjaga ketahanan modal Rp {investment_amount:,.0f} terhadap rotasi sektoral."}]
 
 ━━━━━━━━━━━━━━━━━━
 📊 KOMPOSISI PORTOFOLIO
@@ -509,29 +398,77 @@ Portofolio Anda saat ini dialokasikan pada saham-saham pilihan sebagai berikut:
 Detail saham yang menyusun portofolio Anda beserta sektor dan status tren teknikalnya:
 {stock_details}
 
-4. Tampilkan bagian analisis finansial secara mendalam (WAJIB FORMAT INI, POIN-POIN SANGAT PANJANG & DETAIL):
-
 ━━━━━━━━━━━━━━━━━━
 🛡️ ANALISIS FINANSIAL
 ━━━━━━━━━━━━━━━━━━
-* **Analisis Alokasi & Dominasi Bobot**: Jelaskan dengan sangat detail (minimal 4 kalimat panjang) mengenai porsi pembobotan saham. Analisis mengapa saham dengan bobot terbesar menjadi dominan, apa dampaknya terhadap stabilitas modal, dan bagaimana model {model_choice} menentukan bobot tersebut secara matematis.
-* **Diversifikasi Sektor & Risiko Konsentrasi**: Jelaskan dengan sangat detail (minimal 4 kalimat panjang) bagaimana dana didistribusikan di berbagai sektor dari universe {index_desc}. Sebutkan sektor-sektor yang ada di portofolio dan jelaskan mengapa kombinasi ini memberikan keamanan tambahan ketika terjadi guncangan sektoral.
-* **Strategi Posisi & Karakter Portofolio**: Jelaskan dengan sangat detail (minimal 5 kalimat panjang) tentang strategi posisi yang digunakan. JIKA ada bobot negatif, berikan analisis mendalam mengenai mekanisme short selling step-by-step (pinjam saham → jual → tunggu turun → beli kembali → profit dari selisih), potensi keuntungannya, dan peringatan risiko kerugian tak terbatas yang wajib dipahami investor. Tentukan juga apakah portofolio ini tergolong agresif, moderat, atau defensif.
-
-5. Tampilkan bagian strategi rekomendasi secara persis seperti format di bawah ini:
+* **Analisis Alokasi & Dominasi Bobot**: [Tulis minimal 4 kalimat analitis yang secara spesifik membahas saham-saham dengan bobot terbesar di {portfolio_allocation}, mengapa model {model_choice} memberikan porsi tersebut, dan dampaknya terhadap stabilitas modal Rp {investment_amount:,.0f}.]
+* **Diversifikasi Sektor & Risiko Konsentrasi**: [Tulis minimal 4 kalimat analitis yang menyebutkan sektor-sektor aktual yang muncul di daftar rincian saham di atas (misal Financial Services, Energy, Basic Materials, Consumer, dsb.) serta bagaimana korelasi antar sektor tersebut meredam risiko konsentrasi.]
+* **Strategi Posisi & Karakter Portofolio**: [Tulis minimal 4 kalimat analitis mengenai karakter risiko portofolio ini dan sinyal teknikal saham-sahamnya (BUY/HOLD/AVOID). {"Uraikan juga implikasi praktis dari posisi short selling (bobot negatif) yang ada pada portofolio ini." if has_short else "Jelaskan bagaimana strategi posisi beli (long-only) pada saham-saham di atas mendukung pertumbuhan modal jangka menengah-panjang."}]
 
 ━━━━━━━━━━━━━━━━━━
 💡 Strategi yang Bisa Dipertimbangkan
 ━━━━━━━━━━━━━━━━━━
-👉 Tetap tenang dan hindari keputusan impulsif saat pasar berfluktuasi jangka pendek.
-👉 Lakukan diversifikasi ke sektor-sektor non-komoditas lainnya untuk mengurangi ekspresi risiko pasar.
-👉 Evaluasi berkala bobot saham terbesar Anda dan sesuaikan kembali bila ada berita industri terbaru.
-
-6. Tutup dengan disclaimer berikut secara persis:
+👉 [Tulis 1 rekomendasi tindakan spesifik terkait saham berbobat terbesar atau sinyal BUY/HOLD/AVOID yang ada pada tabel di atas]
+👉 [Tulis 1 rekomendasi tindakan spesifik terkait pengelolaan diversifikasi sektor dan pemantauan volatilitas pada periode mendatang]
+👉 [Tulis 1 rekomendasi tindakan spesifik terkait disiplin eksekusi dan jadwal evaluasi ulang (rebalancing) untuk modal Rp {investment_amount:,.0f}]
 
 ⚠️ Analisis ini merupakan proyeksi berdasarkan data historis dan bukan jaminan keuntungan investasi.
 """
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception:
-        return fallback_text
+
+    ai_text = _call_gemini(prompt, custom_api_key=gemini_api_key, key_env_var="GEMINI_API_KEY_ANALYSIS")
+    if ai_text:
+        return ai_text
+
+    # Dynamic data-driven fallback (tanpa kata-kata template klise) jika API Key belum disetel
+    top_tickers = _parse_top_tickers_from_alloc(portfolio_allocation)
+    top_summary = ", ".join([f"{t} ({w:.1f}%)" for t, w in top_tickers[:4]]) if top_tickers else portfolio_allocation
+
+    sectors_found = sorted(list(set(re.findall(r"Sektor\s+([^,]+),", stock_details))))
+    sectors_str = ", ".join(sectors_found) if sectors_found else "berbagai sektor utama BEI"
+
+    metrics_sentence = (
+        f"Hasil optimasi mencatatkan proyeksi Expected Return tahunan sebesar {annual_return:.2f}% dengan tingkat volatilitas tahunan {annual_risk:.2f}% dan Sharpe Ratio {sharpe_ratio:.3f}."
+        if annual_return is not None and annual_risk is not None and sharpe_ratio is not None
+        else "Hasil optimasi dirancang untuk menyeimbangkan potensi imbal hasil terhadap eksposur volatilitas historis."
+    )
+
+    short_bullet = (
+        f"* **Strategi Posisi & Karakter Portofolio**: Struktur portofolio ini melibatkan kombinasi posisi beli (long) dan posisi bobot negatif (**short selling**) pada emiten tertentu. Strategi ini secara matematis bertujuan memanfaatkan koreksi harga pada saham berkinerja lemah sekaligus membiayai eksposur pada saham berfundamental kuat, namun menuntut pengawasan manajemen risiko dan batas stop-loss yang ketat."
+        if has_short
+        else f"* **Strategi Posisi & Karakter Portofolio**: Seluruh alokasi portofolio menggunakan strategi posisi beli (**long position**) pada saham-saham anggota indeks {index_desc}. Karakter portofolio ini bertumpu pada pertumbuhan nilai intrinsik dan pembagian dividen emiten berkapitalisasi besar dengan manajemen risiko yang terukur."
+    )
+
+    return f"""👋 Hallo Sobat SmartInvest!
+
+Analisis kuantitatif ini memetakan alokasi modal investasi sebesar Rp {investment_amount:,.0f} menggunakan algoritma **{model_choice}** pada universe indeks **{index_desc}** ({index_full_desc}) selama rentang historis **{historical_period}**. {metrics_sentence}
+
+Berdasarkan matriks bobot yang terbentuk, alokasi dana terfokus pada **{top_summary}**. Pemilihan proporsi ini mencerminkan kontribusi masing-masing emiten dalam mengoptimalkan efisiensi portofolio selama periode pengamatan, dengan mempertimbangkan pergerakan harga historis dan sinyal teknikal terkini dari tiap saham.
+
+Secara metodologis, penerapan **{model_desc}** bekerja dengan mengevaluasi hubungan statistik antar-aset di dalam indeks {index_desc}. Emiten yang memiliki konsistensi kinerja dan kovarians risiko yang saling menyeimbangkan memperoleh porsi alokasi yang lebih besar guna menjaga ketahanan portofolio secara agregat.
+
+Distribusi aset pada portofolio ini mencakup sektor **{sectors_str}**, sehingga fluktuasi spesifik pada satu industri dapat diredam oleh kinerja sektor lainnya. Struktur ini memberikan landasan kuantitatif yang terukur bagi pengelolaan modal investasi Anda.
+
+━━━━━━━━━━━━━━━━━━
+📊 KOMPOSISI PORTOFOLIO
+━━━━━━━━━━━━━━━━━━
+Portofolio Anda saat ini dialokasikan pada saham-saham pilihan sebagai berikut:
+{portfolio_allocation}
+
+Detail saham yang menyusun portofolio Anda beserta sektor dan status tren teknikalnya:
+{stock_details}
+
+━━━━━━━━━━━━━━━━━━
+🛡️ ANALISIS FINANSIAL
+━━━━━━━━━━━━━━━━━━
+* **Analisis Alokasi & Dominasi Bobot**: Perhitungan model {model_choice} menempatkan bobot utama pada {top_summary} karena profil efisiensi historisnya yang unggul selama periode {historical_period}. Konsentrasi terukur pada emiten-emiten berlikuiditas tinggi ini berfungsi sebagai penggerak utama imbal hasil sekaligus menjaga stabilitas nilai portofolio senilai Rp {investment_amount:,.0f}.
+* **Diversifikasi Sektor & Risiko Konsentrasi**: Alokasi dana tersebar lintas sektor ({sectors_str}) di dalam indeks {index_desc}. Penyebaran sektoral ini menurunkan risiko spesifik emiten (unsystematic risk) dan menjaga agar koreksi pada satu sektor industri tidak menggerus keseluruhan modal kerja secara drastis.
+{short_bullet}
+
+━━━━━━━━━━━━━━━━━━
+💡 Strategi yang Bisa Dipertimbangkan
+━━━━━━━━━━━━━━━━━━
+👉 Perhatikan sinyal tren teknikal dan rekomendasi (BUY/HOLD/AVOID) pada emiten berbobat terbesar ({top_summary}) sebelum mengeksekusi pembelian penuh.
+👉 Pertahankan disiplin proporsi lintas sektor ({sectors_str}) dan hindari menambah beban berlebih pada satu saham tunggal di luar bobot optimalnya.
+👉 Lakukan evaluasi berkala setiap kuartal untuk menyelaraskan ulang (rebalancing) bobot portofolio dengan perkembangan fundamental terbaru emiten {index_desc}.
+
+⚠️ Analisis ini merupakan proyeksi berdasarkan data historis dan bukan jaminan keuntungan investasi."""

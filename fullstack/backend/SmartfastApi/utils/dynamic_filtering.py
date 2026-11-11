@@ -17,8 +17,8 @@ def validate_period(start_date, end_date, min_months=6):
             "Tanggal awal harus lebih kecil dari tanggal akhir."
         )
 
-    # minimal periode
-    minimum_end_date = start_date + relativedelta(months=min_months)
+    # minimal periode (toleransi 5 hari untuk perbedaan jumlah hari akhir bulan 30 vs 31 hari)
+    minimum_end_date = start_date + relativedelta(months=min_months) - pd.Timedelta(days=5)
 
     if end_date < minimum_end_date:
         raise ValueError(
@@ -155,11 +155,10 @@ def dynamic_filtering(
     # FILTER BI RATE
     # ======================================
 
-    filtered_bi_rate = bi_rate_daily.loc[
-        start_date:end_date
-    ]
+    bi_rate_sorted = bi_rate_daily.sort_index()
+    bi_rate_sorted = bi_rate_sorted[~bi_rate_sorted.index.duplicated(keep="last")]
 
-    filtered_bi_rate = filtered_bi_rate.reindex(
+    filtered_bi_rate = bi_rate_sorted.reindex(
         filtered_price.index,
         method="ffill"
     ).bfill()

@@ -137,7 +137,8 @@ def analyze_portfolio_logic(
     start_date: str,
     end_date: str,
     investment_amount: float,
-    model_choice: str = "ALL"
+    model_choice: str = "ALL",
+    gemini_api_key: str = None
 ):
     """
     Main logic analyze portfolio
@@ -165,8 +166,8 @@ def analyze_portfolio_logic(
         )
 
     delta = relativedelta(
-    end_dt,
-    start_dt
+        end_dt,
+        start_dt
     )
 
     total_months = (
@@ -174,8 +175,8 @@ def analyze_portfolio_logic(
         + delta.months
     )
 
-    # minimal 6 bulan
-    if total_months < 6:
+    # minimal 6 bulan (toleransi perbedaan jumlah hari akhir bulan 30 vs 31 hari)
+    if total_months < 6 and (end_dt - start_dt).days < 175:
         raise ValueError(
             "Periode minimal "
             "6 bulan"
@@ -186,7 +187,7 @@ def analyze_portfolio_logic(
         delta.years == 5
         and (
             delta.months > 0
-            or delta.days > 0
+            or delta.days > 5
         )
     ):
         raise ValueError(
@@ -258,7 +259,7 @@ def analyze_portfolio_logic(
         # PREDICT IHSG
         # ==========================
 
-        ihsg_result = predict_ihsg()
+        ihsg_result = predict_ihsg(gemini_api_key=gemini_api_key)
 
         market_trend = (
             ihsg_result[
@@ -764,7 +765,7 @@ def analyze_portfolio_logic(
     # ==========================
     # GENAI PORTFOLIO SUMMARY
     # ==========================
-    ihsg_result = predict_ihsg(end_date=end_date)
+    ihsg_result = predict_ihsg(end_date=end_date, gemini_api_key=gemini_api_key)
     trend = ihsg_result["market_trend"]
     confidence = ihsg_result["confidence"]
 
@@ -798,7 +799,14 @@ def analyze_portfolio_logic(
             stock_details=stock_details,
             model_choice=model_choice,
             investment_amount=investment_amount,
-            index_choice=index_choice      
+            index_choice=index_choice,
+            annual_return=annual_return,
+            annual_risk=annual_risk,
+            sharpe_ratio=sharpe_ratio,
+            bi_rate=round(risk_free_rate, 3),
+            alpha=alpha_avg,
+            beta=beta_avg,
+            gemini_api_key=gemini_api_key
         )
     else:
         portfolio_summary = f"Portofolio dioptimalkan menggunakan metode {result['method']} dengan Expected Return {annual_return}% dan Risiko {annual_risk}%."

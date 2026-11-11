@@ -8,6 +8,7 @@ class PortfolioRequest(BaseModel):
     end_date: str
     investment_amount: float
     model_choice: Optional[str] = "ALL"
+    gemini_api_key: Optional[str] = None
 
 
 class IHSGRequest(BaseModel):
@@ -15,4 +16,5 @@ class IHSGRequest(BaseModel):
     start_date: str
     end_date: str
     investment_amount: float
-    
+    user_id: Optional[str] = None
+    gemini_api_key: Optional[str] = None

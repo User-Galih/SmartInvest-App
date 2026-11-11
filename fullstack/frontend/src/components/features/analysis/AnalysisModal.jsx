@@ -76,16 +76,20 @@ export default function AnalysisModal({
       : new Date().toISOString().split("T")[0];
 
   const handleQuickSelect = (months) => {
-    const endDate = new Date(effectiveMaxDate);
-    const startDate = new Date(effectiveMaxDate);
-    startDate.setMonth(startDate.getMonth() - months);
-
-    const formatDate = (date) => date.toISOString().split("T")[0];
+    const [year, month, day] = effectiveMaxDate.split("-").map(Number);
+    const targetDate = new Date(Date.UTC(year, month - 1 - months, 1));
+    const targetYear = targetDate.getUTCFullYear();
+    const targetMonth = targetDate.getUTCMonth();
+    const daysInTargetMonth = new Date(
+      Date.UTC(targetYear, targetMonth + 1, 0),
+    ).getUTCDate();
+    const clampedDay = Math.min(day, daysInTargetMonth);
+    const startStr = `${targetYear}-${String(targetMonth + 1).padStart(2, "0")}-${String(clampedDay).padStart(2, "0")}`;
 
     setFormData((prev) => ({
       ...prev,
-      start_date: formatDate(startDate),
-      end_date: formatDate(endDate),
+      start_date: startStr,
+      end_date: effectiveMaxDate,
     }));
 
     // Opsional: hapus error jika user klik tombol cepat
@@ -218,7 +222,12 @@ export default function AnalysisModal({
       onClose();
     } catch (error) {
       console.error(error);
-      toast.error("Gagal melakukan proses analisis data.");
+      const detail = error?.response?.data?.detail;
+      toast.error(
+        detail
+          ? `Gagal analisis: ${detail}`
+          : "Gagal melakukan proses analisis data.",
+      );
     } finally {
       setIsLoading(false);
     }

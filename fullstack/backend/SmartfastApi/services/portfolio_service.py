@@ -10,5 +10,6 @@ def analyze_portfolio(data):
         start_date=data.start_date,
         end_date=data.end_date,
         investment_amount=data.investment_amount,
-        model_choice=data.model_choice
+        model_choice=data.model_choice,
+        gemini_api_key=getattr(data, "gemini_api_key", None)
     )

@@ -144,7 +144,7 @@ def build_ihsg_features(df):
 
     return df.dropna()
 
-def predict_ihsg(end_date=None):
+def predict_ihsg(end_date=None, gemini_api_key=None):
     feature_cols = [
         "Return", "MA20", "MA50", "Volatilitas", "Volume_Log",
         "RSI", "MACD", "MA_Gap", "BB_Width", "ROC5", "Trend_Strength"
@@ -190,7 +190,8 @@ def predict_ihsg(end_date=None):
         confidence=confidence,
         market_condition=market_condition,
         recommended_method=recommended_method,
-        reason=reason
+        reason=reason,
+        gemini_api_key=gemini_api_key
     )
 
     return {
@@ -222,7 +223,8 @@ def predict_ihsg_with_portfolio(
     start_date: str,
     end_date: str,
     investment_amount: float,
-    user_id: str = None # ⚡ Argumen user_id untuk menerima kiriman data form React
+    user_id: str = None, # ⚡ Argumen user_id untuk menerima kiriman data form React
+    gemini_api_key: str = None
 ):
     start_dt = datetime.strptime(start_date, "%Y-%m-%d")
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
@@ -235,12 +237,12 @@ def predict_ihsg_with_portfolio(
     delta = relativedelta(end_dt, start_dt)
     total_months = (delta.years * 12 + delta.months)
 
-    # minimal 6 bulan
-    if total_months < 6:
+    # minimal 6 bulan (toleransi perbedaan jumlah hari akhir bulan 30 vs 31 hari)
+    if total_months < 6 and (end_dt - start_dt).days < 175:
         raise ValueError("Periode minimal 6 bulan")
 
     # maksimal 5 tahun
-    if delta.years > 5 or (delta.years == 5 and (delta.months > 0 or delta.days > 0)):
+    if delta.years > 5 or (delta.years == 5 and (delta.months > 0 or delta.days > 5)):
         raise ValueError("Periode maksimal 5 tahun")
 
     # ==========================
@@ -276,7 +278,7 @@ def predict_ihsg_with_portfolio(
     # ==========================
     # 4. PREDICT IHSG TREND
     # ==========================
-    ihsg_res = predict_ihsg(end_date=end_date)
+    ihsg_res = predict_ihsg(end_date=end_date, gemini_api_key=gemini_api_key)
     market_trend = ihsg_res["market_trend"]
     confidence = ihsg_res["confidence"]
     prediction_class = ihsg_res["prediction_class"]
@@ -473,7 +475,8 @@ def predict_ihsg_with_portfolio(
             alloc_str=alloc_str,
             comparison_str=comparison_str,
             investment_amount=int(investment_amount),
-            index_choice=index_choice
+            index_choice=index_choice,
+            gemini_api_key=gemini_api_key
         )
     except Exception as e:
         ai_interpretation = f"GenAI Error: {str(e)}"
