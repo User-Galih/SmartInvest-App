@@ -144,7 +144,7 @@ def build_ihsg_features(df):
 
     return df.dropna()
 
-def predict_ihsg(end_date=None, gemini_api_key=None):
+def predict_ihsg(end_date=None, gemini_api_key=None, include_summary=False):
     feature_cols = [
         "Return", "MA20", "MA50", "Volatilitas", "Volume_Log",
         "RSI", "MACD", "MA_Gap", "BB_Width", "ROC5", "Trend_Strength"
@@ -185,14 +185,17 @@ def predict_ihsg(end_date=None, gemini_api_key=None):
         market_condition = "Pasar sideways"
         reason = "MVEP membantu optimasi risk-return saat pasar stabil."
 
-    market_summary = generate_market_summary(
-        market_trend=trend,
-        confidence=confidence,
-        market_condition=market_condition,
-        recommended_method=recommended_method,
-        reason=reason,
-        gemini_api_key=gemini_api_key
-    )
+    if include_summary:
+        market_summary = generate_market_summary(
+            market_trend=trend,
+            confidence=confidence,
+            market_condition=market_condition,
+            recommended_method=recommended_method,
+            reason=reason,
+            gemini_api_key=gemini_api_key
+        )
+    else:
+        market_summary = f"IHSG diprediksi {trend} ({confidence:.1%}) — {reason}"
 
     return {
         "market_trend": trend,

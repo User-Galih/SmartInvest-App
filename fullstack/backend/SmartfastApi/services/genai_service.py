@@ -1,78 +1,111 @@
 import os
 import re
+import requests
+from supabase import create_client
 
-# Model prioritas sesuai generasi terbaru Google AI Studio
-PREFERRED_MODELS = [
-    os.getenv("GEMINI_MODEL", "gemini-3.8-flash"),
-    "gemini-4-argon",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
+DEFAULT_SUPABASE_URL = "https://alsduqrfszpqktliknfe.supabase.co"
+DEFAULT_SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsc2R1cXJmc3pwcWt0bGlrbmZlIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ0MjA0ODAsImV4cCI6MjEwOTk5NjQ4MH0.jq_DxhB_Y24yZcesaLy7cu2FDkcJbB5qxjYOw1PmMcU"
+
+# Daftar model kuota tinggi & latensi rendah sesuai akun Google AI Studio
+ANALYSIS_MODELS = [
+    os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"),
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
 ]
 
+RECOMMENDATION_MODELS = [
+    os.getenv("GEMINI_MODEL_RECOMMENDATION", "gemini-3.1-flash-lite"),
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+]
 
-def _call_gemini(prompt: str, custom_api_key: str = None, key_env_var: str = "GEMINI_API_KEY") -> str | None:
-    """
-    Memanggil Gemini API menggunakan SDK google-genai terbaru (dengan fallback ke google.generativeai)
-    dan mencoba daftar model prioritas secara berurutan.
-    Mengembalikan None jika tidak ada API Key atau seluruh model gagal.
-    """
+_CACHED_SUPABASE_GEMINI_KEY = None
+
+
+def _get_gemini_key(custom_api_key: str = None, key_env_var: str = "GEMINI_API_KEY") -> str | None:
+    global _CACHED_SUPABASE_GEMINI_KEY
     key = (
         custom_api_key
         or os.getenv(key_env_var)
         or os.getenv("GEMINI_API_KEY_ANALYSIS")
         or os.getenv("GEMINI_API_KEY_IHSG")
         or os.getenv("GEMINI_API_KEY")
+        or _CACHED_SUPABASE_GEMINI_KEY
     )
-    if not key or not key.strip():
+    if key and key.strip():
+        return key.strip()
+
+    try:
+        sb_url = os.getenv("SUPABASE_URL") or DEFAULT_SUPABASE_URL
+        sb_key = os.getenv("SUPABASE_KEY") or DEFAULT_SUPABASE_KEY
+        sb = create_client(sb_url, sb_key)
+        res = (
+            sb.table("system_logs")
+            .select("value")
+            .eq("key", "gemini_api_key")
+            .limit(1)
+            .execute()
+        )
+        if res.data and len(res.data) > 0:
+            fetched_key = (res.data[0].get("value") or "").strip()
+            if fetched_key:
+                _CACHED_SUPABASE_GEMINI_KEY = fetched_key
+                return fetched_key
+    except Exception as e:
+        print(f"[genai_service] Gagal mengambil gemini_api_key dari Supabase: {e}")
+
+    return None
+
+
+def _call_gemini(
+    prompt: str,
+    custom_api_key: str = None,
+    key_env_var: str = "GEMINI_API_KEY",
+    models_order: list = None,
+) -> str | None:
+    """
+    Memanggil Gemini REST API v1beta secara langsung (dengan fallback berurutan
+    lintas model berkuota tinggi: gemini-3.5-flash-lite, gemini-3.1-flash-lite, gemini-3.8-flash).
+    """
+    key = _get_gemini_key(custom_api_key=custom_api_key, key_env_var=key_env_var)
+    if not key:
         return None
 
-    key = key.strip()
+    model_list = models_order or ANALYSIS_MODELS
+    seen = set()
 
-    # 1. Gunakan SDK resmi terbaru: google-genai
-    try:
-        from google import genai as new_genai
-
-        client = new_genai.Client(api_key=key)
-        seen = set()
-        for model_name in PREFERRED_MODELS:
-            if not model_name or model_name in seen:
-                continue
-            seen.add(model_name)
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
+    for model_name in model_list:
+        if not model_name or model_name in seen:
+            continue
+        seen.add(model_name)
+        clean_model = model_name.replace("models/", "")
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={key}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": 0.65,
+            },
+        }
+        try:
+            resp = requests.post(url, json=payload, timeout=22)
+            if resp.status_code == 200:
+                data = resp.json()
+                candidates = data.get("candidates") or []
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts") or []
+                    text_out = "".join(p.get("text", "") for p in parts).strip()
+                    if text_out:
+                        print(f"[genai_service] Sukses generate via {clean_model}")
+                        return text_out
+            else:
+                print(
+                    f"[genai_service] Model {clean_model} mengembalikan HTTP {resp.status_code}: {resp.text[:200]}"
                 )
-                if response and getattr(response, "text", None):
-                    return response.text.strip()
-            except Exception as err:
-                print(f"[genai_service] google-genai gagal pada model {model_name}: {err}")
-                continue
-    except ImportError:
-        pass
-    except Exception as e:
-        print(f"[genai_service] Inisialisasi google-genai gagal: {e}")
-
-    # 2. Fallback ke SDK legacy jika google-genai belum terinstal di environment
-    try:
-        import google.generativeai as legacy_genai
-
-        legacy_genai.configure(api_key=key)
-        seen = set()
-        for model_name in PREFERRED_MODELS:
-            if not model_name or model_name in seen:
-                continue
-            seen.add(model_name)
-            try:
-                model = legacy_genai.GenerativeModel(model_name)
-                response = model.generate_content(prompt)
-                if response and getattr(response, "text", None):
-                    return response.text.strip()
-            except Exception as err:
-                print(f"[genai_service] google.generativeai gagal pada model {model_name}: {err}")
-                continue
-    except Exception as e:
-        print(f"[genai_service] Fallback legacy SDK gagal: {e}")
+        except Exception as err:
+            print(f"[genai_service] Gagal memanggil model {clean_model}: {err}")
+            continue
 
     return None
 
@@ -112,7 +145,12 @@ Tugasmu:
 4. Berikan 2-3 langkah taktis yang relevan dengan kondisi {market_trend}.
 5. Gunakan Bahasa Indonesia yang profesional, mengalir alami, edukatif, dan mudah dipahami (maksimal 180 kata). Hindari kata-kata slang/alay seperti "gokil", "gercep", atau "anti-boncos".
 """
-    ai_text = _call_gemini(prompt, custom_api_key=gemini_api_key, key_env_var="GEMINI_API_KEY_IHSG")
+    ai_text = _call_gemini(
+        prompt,
+        custom_api_key=gemini_api_key,
+        key_env_var="GEMINI_API_KEY_IHSG",
+        models_order=ANALYSIS_MODELS,
+    )
     if ai_text:
         return ai_text
 
@@ -238,11 +276,16 @@ Perbandingan skor metode optimasi portofolio Anda:
 ⚠️ Ini bukan jaminan keuntungan, hanya proyeksi berdasarkan data historis pasar.
 """
 
-    ai_text = _call_gemini(prompt, custom_api_key=gemini_api_key, key_env_var="GEMINI_API_KEY_ANALYSIS")
+    ai_text = _call_gemini(
+        prompt,
+        custom_api_key=gemini_api_key,
+        key_env_var="GEMINI_API_KEY_ANALYSIS",
+        models_order=RECOMMENDATION_MODELS,
+    )
     if ai_text:
         return ai_text
 
-    # Dynamic data-driven fallback (tanpa kata-kata alay/template kaku) jika API Key belum disetel
+    # Dynamic data-driven fallback (tanpa kata-kata alay/template kaku) jika API gagal
     top_tickers = _parse_top_tickers_from_alloc(alloc_str)
     top_names = ", ".join([f"{t} ({w:.1f}%)" for t, w in top_tickers[:3]]) if top_tickers else "saham-saham berfundamental utama"
 
@@ -415,11 +458,16 @@ Detail saham yang menyusun portofolio Anda beserta sektor dan status tren teknik
 ⚠️ Analisis ini merupakan proyeksi berdasarkan data historis dan bukan jaminan keuntungan investasi.
 """
 
-    ai_text = _call_gemini(prompt, custom_api_key=gemini_api_key, key_env_var="GEMINI_API_KEY_ANALYSIS")
+    ai_text = _call_gemini(
+        prompt,
+        custom_api_key=gemini_api_key,
+        key_env_var="GEMINI_API_KEY_ANALYSIS",
+        models_order=ANALYSIS_MODELS,
+    )
     if ai_text:
         return ai_text
 
-    # Dynamic data-driven fallback (tanpa kata-kata template klise) jika API Key belum disetel
+    # Dynamic data-driven fallback (tanpa kata-kata template klise) jika API gagal
     top_tickers = _parse_top_tickers_from_alloc(portfolio_allocation)
     top_summary = ", ".join([f"{t} ({w:.1f}%)" for t, w in top_tickers[:4]]) if top_tickers else portfolio_allocation
 
